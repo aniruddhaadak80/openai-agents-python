@@ -233,6 +233,36 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_limit_not_forwarded_as_provider_page_size(self, mock_openai_client):
+        """A session limit must bound local history, not the provider page size."""
+        stored = [
+            {"id": f"item_{index}", "role": "user", "content": f"msg {index}"} for index in range(5)
+        ]
+        list_kwargs: dict[str, Any] = {}
+        pulled = 0
+
+        async def fake_list(**kwargs: Any):
+            nonlocal pulled
+            list_kwargs.update(kwargs)
+            for item in reversed(stored):
+                pulled += 1
+                mock_item = MagicMock()
+                mock_item.model_dump.return_value = item
+                yield mock_item
+
+        mock_openai_client.conversations.items.list = fake_list
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        result = await session.get_items(limit=3)
+
+        assert "limit" not in list_kwargs
+        assert list_kwargs == {"conversation_id": "test_id", "order": "desc"}
+        assert result == stored[-3:]
+        assert pulled == 3
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
