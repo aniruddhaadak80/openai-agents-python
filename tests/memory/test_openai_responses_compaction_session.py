@@ -2115,3 +2115,60 @@ class TestTypeGuard:
 
     def test_is_compaction_aware_session_none(self) -> None:
         assert is_openai_responses_compaction_aware_session(None) is False
+
+
+class TestPopItemResetsResponseChain:
+    """Regression tests for #4867: pop must not retain the response chain."""
+
+    @pytest.mark.asyncio
+    async def test_pop_item_resets_response_chain_state(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda _context: True,
+        )
+
+        await session._defer_compaction("resp-deferred")
+        assert session._deferred_response_id == "resp-deferred"
+        session.should_trigger_compaction = lambda _context: False
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        assert session._response_id == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
+        mock_client.responses.compact.assert_not_awaited()
+
+        assert await session.pop_item() == item
+        assert session._response_id is None
+        assert session._deferred_response_id is None
+        assert session._last_unstored_response_id is None
+
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pop_item_noop_preserves_response_chain_state(self) -> None:
+        underlying = SimpleListSession(history=[])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        assert await session.pop_item() is None
+        assert session._response_id == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
