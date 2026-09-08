@@ -547,12 +547,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             except (Exception, asyncio.CancelledError):
                 self._compaction_candidate_items = None
                 self._session_items = None
-                self._deferred_response_id = None
                 self._mutation_generation += 1
                 raise
             self._compaction_candidate_items = []
             self._session_items = []
+            self._response_id = None
             self._deferred_response_id = None
+            self._last_unstored_response_id = None
             self._mutation_generation += 1
 
     async def _ensure_compaction_candidates(

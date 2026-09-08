@@ -2115,3 +2115,70 @@ class TestTypeGuard:
 
     def test_is_compaction_aware_session_none(self) -> None:
         assert is_openai_responses_compaction_aware_session(None) is False
+
+
+class TestClearSessionResetsResponseChain:
+    """Regression tests for #4864: clear must not retain the response chain."""
+
+    @pytest.mark.asyncio
+    async def test_clear_session_resets_response_chain_state(self) -> None:
+        underlying = SimpleListSession(
+            history=[
+                cast(
+                    TResponseInputItem,
+                    {"type": "message", "role": "assistant", "content": "old"},
+                )
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: True,
+        )
+
+        await session._defer_compaction("resp-deferred")
+        assert session._deferred_response_id == "resp-deferred"
+        session.should_trigger_compaction = lambda _context: False
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        assert session._response_id == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
+        await session.clear_session()
+        assert session._response_id is None
+        assert session._deferred_response_id is None
+        assert session._last_unstored_response_id is None
+
+        with pytest.raises(ValueError, match="no response ID is available|requires a response_id"):
+            await session.run_compaction({"force": True, "compaction_mode": "previous_response_id"})
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_clear_session_failure_preserves_response_chain_state(self) -> None:
+        underlying = SimpleListSession(
+            history=[
+                cast(
+                    TResponseInputItem,
+                    {"type": "message", "role": "assistant", "content": "old"},
+                )
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+
+        async def failing_clear() -> None:
+            raise RuntimeError("clear failed")
+
+        underlying.clear_session = failing_clear  # type: ignore[method-assign]
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-old", "store": True})
+        with pytest.raises(RuntimeError, match="clear failed"):
+            await session.clear_session()
+        assert session._response_id == "resp-old"
